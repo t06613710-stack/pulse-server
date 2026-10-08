@@ -1,0 +1,147 @@
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors');
+const path = require('path');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ============ ХРАНИЛИЩЕ ============
+const users = new Map();
+const messages = new Map();
+const connections = new Map();
+
+function chatKey(a, b){ return [a,b].sort().join('::'); }
+function publicUser(u){
+  return {
+    username: u.username, name: u.name, avatar: u.avatar,
+    color: u.color, bio: u.bio, online: u.online
+  };
+}
+function randomColor(){
+  const c=['#6C5CE7','#00CEC9','#FDCB6E','#ff6b6b','#a29bfe','#74b9ff','#55efc4'];
+  return c[Math.floor(Math.random()*c.length)];
+}
+
+// ============ API ============
+app.get('/api/users', (req, res) => {
+  res.json(Array.from(users.values()).map(publicUser));
+});
+
+app.get('/api/find/:username', (req, res) => {
+  const u = users.get(req.params.username.toLowerCase());
+  if(!u) return res.status(404).json({ error: 'Не найден' });
+  res.json(publicUser(u));
+});
+
+app.post('/api/register', (req, res) => {
+  const { username, name, avatar, bio } = req.body;
+  if(!username || !name) return res.status(400).json({ error: 'Нужны username и name' });
+
+  const key = username.toLowerCase().replace(/[^a-z0-9_]/g, '');
+  if(!key) return res.status(400).json({ error: 'Некорректный username' });
+
+  if(users.has(key)){
+    const u = users.get(key);
+    if(name) u.name = name;
+    if(avatar) u.avatar = avatar;
+    if(bio) u.bio = bio;
+    return res.json({ ok: true, user: publicUser(u), existing: true });
+  }
+
+  const user = {
+    username: key, name,
+    avatar: avatar || name[0].toUpperCase(),
+    color: randomColor(),
+    bio: bio || 'Пользователь Pulse',
+    socketId: null, online: false
+  };
+  users.set(key, user);
+  console.log(`👤 Регистрация: @${key}`);
+  res.json({ ok: true, user: publicUser(user), existing: false });
+});
+
+// ============ SOCKET.IO ============
+io.on('connection', (socket) => {
+  console.log('🔌 Подключение:', socket.id);
+
+  socket.on('login', ({ username }) => {
+    const key = username.toLowerCase();
+    const user = users.get(key);
+    if(!user){ socket.emit('error-msg', 'Пользователь не найден'); return; }
+    user.socketId = socket.id;
+    user.online = true;
+    connections.set(socket.id, key);
+    socket.join('user:' + key);
+    socket.emit('logged-in', { user: publicUser(user) });
+    io.emit('users-update', Array.from(users.values()).map(publicUser));
+    console.log(`✅ Вход: @${key}`);
+  });
+
+  socket.on('send-message', ({ to, text, voice, dur }) => {
+    const fromKey = connections.get(socket.id);
+    if(!fromKey) return;
+    const toKey = to.toLowerCase();
+    const toUser = users.get(toKey);
+    const fromUser = users.get(fromKey);
+    if(!toUser || !fromUser) return;
+
+    const msg = {
+      from: fromKey, to: toKey, text: text || '',
+      voice: !!voice, dur: dur || 0, time: Date.now(), reactions: []
+    };
+
+    const key = chatKey(fromKey, toKey);
+    if(!messages.has(key)) messages.set(key, []);
+    messages.get(key).push(msg);
+
+    io.to('user:' + fromKey).emit('new-message', msg);
+    if(toUser.online) io.to('user:' + toKey).emit('new-message', msg);
+    console.log(`💬 ${fromKey} → ${toKey}`);
+  });
+
+  socket.on('get-history', ({ with: other }) => {
+    const me = connections.get(socket.id);
+    if(!me) return;
+    const key = chatKey(me, other.toLowerCase());
+    socket.emit('history', { with: other.toLowerCase(), messages: messages.get(key) || [] });
+  });
+
+  socket.on('react', ({ to, time, emoji }) => {
+    const me = connections.get(socket.id);
+    if(!me) return;
+    const key = chatKey(me, to.toLowerCase());
+    const list = messages.get(key) || [];
+    const msg = list.find(m => m.time === time);
+    if(!msg) return;
+    if(!msg.reactions) msg.reactions = [];
+    const existing = msg.reactions.findIndex(r => r.by === me);
+    if(existing >= 0) msg.reactions[existing].emoji = emoji;
+    else msg.reactions.push({ emoji, by: me });
+    io.to('user:' + me).emit('message-updated', msg);
+    if(users.get(to.toLowerCase())?.online) io.to('user:' + to.toLowerCase()).emit('message-updated', msg);
+  });
+
+  socket.on('disconnect', () => {
+    const key = connections.get(socket.id);
+    if(key){
+      const u = users.get(key);
+      if(u){ u.online = false; u.socketId = null; }
+      connections.delete(socket.id);
+      io.emit('users-update', Array.from(users.values()).map(publicUser));
+      console.log(`❌ Отключился: @${key}`);
+    }
+  });
+});
+
+// ============ ЗАПУСК ============
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`⚡ Pulse Server на порту ${PORT}`);
+});
