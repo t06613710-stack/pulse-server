@@ -1,0 +1,75 @@
+// ============ ПОДКЛЮЧЕНИЕ К СЕРВЕРУ ============
+const socket = io();
+
+socket.on('connect', () => console.log('✅ Подключено к серверу'));
+
+// Регистрация на сервере
+async function registerOnServer(username, name, avatar, bio){
+  const res = await fetch('/api/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, name, avatar, bio })
+  });
+  return res.json();
+}
+
+// Логин через сокет
+function loginSocket(username){
+  socket.emit('login', { username });
+}
+
+// Получить список всех
+async function fetchUsers(){
+  const res = await fetch('/api/users');
+  return res.json();
+}
+
+// Найти по username
+async function findUser(username){
+  const res = await fetch('/api/find/' + username);
+  if(!res.ok) return null;
+  return res.json();
+}
+
+// Отправить сообщение
+function sendToServer(to, text, voice, dur){
+  socket.emit('send-message', { to, text, voice, dur });
+}
+
+// Получить историю
+function getHistory(withUser){
+  socket.emit('get-history', { with: withUser });
+}
+
+// Реакция
+function reactToServer(to, time, emoji){
+  socket.emit('react', { to, time, emoji });
+}
+
+// Приём сообщений
+socket.on('new-message', (msg) => {
+  const other = msg.from === myProfile.username ? msg.to : msg.from;
+  if(!histories[other]) histories[other] = [];
+  histories[other].push({ ...msg, who: msg.from === myProfile.username ? 'me' : 'bot' });
+  renderContacts();
+  if(currentChat.id === other){
+    renderMsg({ ...msg, who: msg.from === myProfile.username ? 'me' : 'bot' });
+  }
+});
+
+socket.on('history', ({ with: other, messages: list }) => {
+  histories[other] = list.map(m => ({
+    ...m, who: m.from === myProfile.username ? 'me' : 'bot'
+  }));
+});
+
+socket.on('users-update', (list) => {
+  allUsersServer = list;
+});
+
+socket.on('logged-in', ({ user }) => {
+  myProfile.username = user.username;
+  myProfile.name = user.name;
+  myProfile.avatar = user.avatar;
+  myProfile.color = user.color;
+});
